@@ -59,8 +59,6 @@ class MultiheadAttention(nn.Module):
         self.onnx_trace = False
 
         self.enable_torch_version = True
-        if self.onnx_trace:
-            self.enable_torch_version = False
 
     def prepare_for_onnx_export_(self):
         self.onnx_trace = True
@@ -92,8 +90,9 @@ class MultiheadAttention(nn.Module):
         batch x src_len, where padding elements are indicated by 1s.
         """
 
-        if self.enable_torch_version and !self.onnx_trace:
-            return self.forward_torch_version(query, key, value, key_padding_mask,
+        # Apply torch.nn.MultiheadAttention module
+        if self.enable_torch_version and not self.onnx_trace:
+            return self._forward_torch_version(query, key, value, key_padding_mask,
                                               incremental_state, need_weights
                                               static_kv, attn_mask)
 
@@ -243,7 +242,6 @@ class MultiheadAttention(nn.Module):
                                key_padding_mask, incremental_state,
                                need_weights, static_kv, attn_mask):
 
-        # Apply torch.nn.MultiheadAttention module
         if self.qkv_same_dim:
             q_proj_weight = self.in_proj_weight[:embed_dim, :]
             k_proj_weight = self.in_proj_weight[embed_dim:(embed_dim * 2), :]
@@ -272,25 +270,6 @@ class MultiheadAttention(nn.Module):
             else:
                 saved_state = None
 
-#            if qkv_same:
-#                # self-attention
-#                q, k, v = self.in_proj_qkv(query)
-#            elif kv_same:
-#                # encoder-decoder attention
-#                q = self.in_proj_q(query)
-#                if key is None:
-#                    assert value is None
-#                    k = v = None
-#                else:
-#                    k = self.in_proj_k(key)
-#                    v = self.in_proj_v(key)
-#
-#            else:
-#                q = self.in_proj_q(query)
-#                k = self.in_proj_k(key)
-#                v = self.in_proj_v(value)
-#            q *= self.scaling
-#
             bias = self.in_proj_bias
             if bias is not None:
                 bias = bias[embed_dim:(embed_dim * 2), :] 
@@ -305,13 +284,6 @@ class MultiheadAttention(nn.Module):
                 assert self.bias_v is not None
                 k = torch.cat([k, self.bias_k.repeat(1, bsz, 1)])
                 v = torch.cat([v, self.bias_v.repeat(1, bsz, 1)])
-#                if attn_mask is not None:
-#                    attn_mask = torch.cat([attn_mask, attn_mask.new_zeros(attn_mask.size(0), 1)], dim=1)
-#                if key_padding_mask is not None:
-#                    key_padding_mask = torch.cat(
-#                        [key_padding_mask, key_padding_mask.new_zeros(key_padding_mask.size(0), 1)], dim=1)
-#
-#            q = q.contiguous().view(tgt_len, bsz * self.num_heads, self.head_dim).transpose(0, 1)
             if k is not None:
                 k = k.contiguous().view(-1, bsz * self.num_heads, self.head_dim).transpose(0, 1)
             if v is not None:
@@ -336,26 +308,11 @@ class MultiheadAttention(nn.Module):
 
                 self._set_input_buffer(incremental_state, saved_state)
 
-#            src_len = k.size(1)
-#
-#            # This is part of a workaround to get around fork/join parallelism
-#            # not supporting Optional types.
-#            if key_padding_mask is not None and key_padding_mask.shape == torch.Size([]):
-#                key_padding_mask = None
-#
-#            if key_padding_mask is not None:
-#                assert key_padding_mask.size(0) == bsz
-#                assert key_padding_mask.size(1) == src_len
-#
+            src_len = k.size(1)
             if self.add_zero_attn:
- #               src_len += 1
+                src_len += 1
                 k = torch.cat([k, k.new_zeros((k.size(0), 1) + k.size()[2:])], dim=1)
                 v = torch.cat([v, v.new_zeros((v.size(0), 1) + v.size()[2:])], dim=1)
-#                if attn_mask is not None:
-#                    attn_mask = torch.cat([attn_mask, attn_mask.new_zeros(attn_mask.size(0), 1)], dim=1)
-#                if key_padding_mask is not None:
-#                    key_padding_mask = torch.cat(
-#                        [key_padding_mask, torch.zeros(key_padding_mask.size(0), 1).type_as(key_padding_mask)], dim=1)
 
         else:
             k = None
@@ -368,55 +325,6 @@ class MultiheadAttention(nn.Module):
                                                self.out_proj.weight, self.out_proj.bias,
                                                self.training, key_padding_mask, need_weights,
                                                attn_mask, k, v)
-
-#        attn_weights = torch.bmm(q, k.transpose(1, 2))
-#        assert list(attn_weights.size()) == [bsz * self.num_heads, tgt_len, src_len]
-#
-#        if attn_mask is not None:
-#            attn_mask = attn_mask.unsqueeze(0)
-#            if self.onnx_trace:
-#                attn_mask = attn_mask.repeat(attn_weights.size(0), 1, 1)
-#            attn_weights += attn_mask
-#
-#        if key_padding_mask is not None:
-#            # don't attend to padding symbols
-#            attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-#            if self.onnx_trace:
-#                attn_weights = torch.where(
-#                    key_padding_mask.unsqueeze(1).unsqueeze(2),
-#                    torch.Tensor([float("-Inf")]),
-#                    attn_weights.float()
-#                ).type_as(attn_weights)
-#            else:
-#                attn_weights = attn_weights.float().masked_fill(
-#                    key_padding_mask.unsqueeze(1).unsqueeze(2),
-#                    float('-inf'),
-#                ).type_as(attn_weights)  # FP16 support: cast to float and back
-#            attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
-#
-#        attn_weights = utils.softmax(
-#            attn_weights, dim=-1, onnx_trace=self.onnx_trace,
-#        ).type_as(attn_weights)
-#        attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
-#
-#        attn = torch.bmm(attn_weights, v)
-#        assert list(attn.size()) == [bsz * self.num_heads, tgt_len, self.head_dim]
-#        if (self.onnx_trace and attn.size(1) == 1):
-#            # when ONNX tracing a single decoder step (sequence length == 1)
-#            # the transpose is a no-op copy before view, thus unnecessary
-#            attn = attn.contiguous().view(tgt_len, bsz, embed_dim)
-#        else:
-#            attn = attn.transpose(0, 1).contiguous().view(tgt_len, bsz, embed_dim)
-#        attn = self.out_proj(attn)
-#
-#        if need_weights:
-#            # average attention weights over heads
-#            attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-#            attn_weights = attn_weights.sum(dim=1) / self.num_heads
-#        else:
-#            attn_weights = None
-#
-#        return attn, attn_weights
 
     def in_proj_qkv(self, query):
         return self._in_proj(query).chunk(3, dim=-1)
